@@ -5,31 +5,45 @@ from losses import vae_tabular_loss
 
 
 class VAEModule(l.LightningModule):
-    def __init__(self, model, optimizer):
+    def __init__(self, model):
         super().__init__()
         self.model = model
-        self.optimizer = optimizer
         self.loss_history = []
-        self.loss_per_epoch = []
+        self.reconstruction_feats_history = []
+        self.reconstruction_labels_history = []
+        self.kl_div_loss_history = []
+        self.lr_history = []
 
-    def training_step(self, batch, batch_idx):
+        self.loss_history_epoch = []
+        self.reconstruction_feats_history_epoch = []
+        self.reconstruction_labels_epoch = []
+        self.kl_div_loss_history_epoch = []
+        
+
+    def training_step(self, batch):
         x, y = batch
         x = torch.cat([x, y], dim=1)
         x_recon, mu, logvar = self.model(x.float())
         loss, recon_cont, recon_cat, kl = vae_tabular_loss(x.float(), x_recon, mu, logvar)
-        global_reconstruction_loss = recon_cont + recon_cat
-        self.log('VAELoss', loss, on_epoch=True, on_step=False, prog_bar=True)
-        self.log('ReconstructionLoss', global_reconstruction_loss, on_epoch=True, on_step=False, prog_bar=True)
-        self.log('ReconstructionLoss_Feats', recon_cont, on_epoch=True, on_step=False, prog_bar=True)
-        self.log('ReconstructionLoss_Targets', recon_cat, on_epoch=True, on_step=False, prog_bar=True)
-        self.log('KullbackLeiblerDiv', kl, on_epoch=True, on_step=False, prog_bar=True)
         self.loss_history.append(loss.item())
+        self.reconstruction_feats_history.append(recon_cont.item())
+        self.reconstruction_labels_history.append(recon_cat.item())
+        self.kl_div_loss_history.append(kl.item())
+        current_lr = self.optimizers().param_groups[0]["lr"]
+        self.lr_history.append(current_lr)
         return loss
 
-    def on_train_epoch_end(self):
-        epoch_loss = sum(self.loss_history) / len(self.loss_history)
-        self.loss_per_epoch.append(epoch_loss)
-        self.loss_history = []
+    
 
     def configure_optimizers(self):
-        return self.optimizer
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer, max_lr=1e-4, total_steps=self.trainer.estimated_stepping_batches)
+
+
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step"
+            }
+        }
