@@ -2,11 +2,13 @@ import torch
 import torch.nn as nn
 
 
-class TabularVAE(nn.Module):
+class VAE(nn.Module):
     def __init__(self, input_dim: int = 31, latent_dim: int = 16):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Linear(input_dim, 128),
+            nn.Linear(input_dim, 256),
+            nn.ReLU(),
+            nn.Linear(256, 128),
             nn.ReLU(),
             nn.Linear(128, 64),
             nn.ReLU()
@@ -19,7 +21,9 @@ class TabularVAE(nn.Module):
             nn.ReLU(),
             nn.Linear(64, 128),
             nn.ReLU(),
-            nn.Linear(128, input_dim)
+            nn.Linear(128, 256),
+            nn.ReLU(),
+            nn.Linear(256, input_dim)
         )
 
     def encode(self, x):
