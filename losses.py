@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 
 
-def vae_tabular_loss(x, x_recon, mu, logvar, ncont=30, beta=0.01):
+def vae_tabular_loss(x, x_recon, mu, logvar, ncont=30, beta=0.03):
     x_cont = x[:, :ncont]
     x_recon_cont = x_recon[:, :ncont]
     recon_loss_cont = F.mse_loss(x_recon_cont, x_cont)
