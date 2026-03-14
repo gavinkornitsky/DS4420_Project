@@ -29,21 +29,29 @@ class VAEModule(l.LightningModule):
         self.reconstruction_feats_history.append(recon_cont.item())
         self.reconstruction_labels_history.append(recon_cat.item())
         self.kl_div_loss_history.append(kl.item())
-        current_lr = self.optimizers().param_groups[0]["lr"]
-        self.lr_history.append(current_lr)
         return loss
 
-    
+    def on_train_epoch_end(self):
+        self.loss_history_epoch.append(sum(self.loss_history) / len(self.loss_history))
+        self.reconstruction_feats_history_epoch.append(sum(self.reconstruction_feats_history) / len(self.reconstruction_feats_history))
+        self.reconstruction_labels_epoch.append(sum(self.reconstruction_labels_history) / len(self.reconstruction_labels_history))
+        self.kl_div_loss_history_epoch.append(sum(self.kl_div_loss_history) / len(self.kl_div_loss_history))
+        self.lr_history.append(self.optimizers().param_groups[0]["lr"])
+
+        self.loss_history.clear()
+        self.reconstruction_feats_history.clear()
+        self.reconstruction_labels_history.clear()
+        self.kl_div_loss_history.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
-        scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer, max_lr=1e-4, total_steps=self.trainer.estimated_stepping_batches)
+        # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer, max_lr=1e-4, total_steps=self.trainer.estimated_stepping_batches)
 
 
         return {
             "optimizer": optimizer,
-            "lr_scheduler": {
-                "scheduler": scheduler,
-                "interval": "step"
-            }
+            # "lr_scheduler": {
+            #     "scheduler": scheduler,
+            #     "interval": "step"
+            # }
         }
