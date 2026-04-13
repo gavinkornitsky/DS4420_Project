@@ -1,7 +1,7 @@
 import pandas as pd
 from sklearn.preprocessing import StandardScaler
 import torch
-from torch.utils.data import TensorDataset, DataLoader
+from torch.utils.data import TensorDataset, DataLoader, WeightedRandomSampler
 import lightning as l
 import numpy as np
 import os
@@ -21,7 +21,7 @@ class WDBCDataModule(l.LightningDataModule):
 
         dir_name = os.path.dirname(__file__)
         X = pd.read_parquet(os.path.join(dir_name, "data/train/features.parquet")).values.astype(np.float32)
-        y = pd.get_dummies(pd.read_parquet(os.path.join(dir_name, "data/train/targets.parquet")), drop_first=True).values.astype(np.float32)
+        y = pd.get_dummies(pd.read_parquet(os.path.join(dir_name, "data/train/targets.parquet")), drop_first=True).values.ravel().astype(np.float32)
         
         # save normalization stats for generating new data
         self.feature_mean = X.mean(axis=0)
@@ -46,10 +46,13 @@ class WDBCDataModule(l.LightningDataModule):
         self.val_y = torch.tensor(self.y[val_indices])
     
     def train_dataloader(self):
-        return DataLoader(TensorDataset(self.train_X, self.train_y), batch_size=self.batch_size, shuffle=True)
+        class_counts = np.bincount(self.train_y.astype(int), minlength=2)
+        weights = np.where(self.train_y == 0, 1.0 / class_counts[0], 1.0 / class_counts[1])
+        sampler = WeightedRandomSampler(weights, num_samples=len(self.train_y), replacement=True)
+        return DataLoader(TensorDataset(self.train_X, self.train_y), batch_size=self.batch_size, sampler=sampler)
     
     def val_dataloader(self):
-        return DataLoader(TensorDataset(self.val_X, self.val_y), batch_size=self.batch_size)
+        return DataLoader(TensorDataset(self.val_X, self.val_y), batch_size=self.batch_size, shuffle=False)
 
 
 # test datamodule
