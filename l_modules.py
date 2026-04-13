@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning as l
+import numpy as np
 
 class VAEModule(l.LightningModule):
     def __init__(
@@ -120,8 +121,10 @@ class VAEModule(l.LightningModule):
     def generate(self, n_samples=10):
         z = torch.randn(n_samples, self.hparams.latent_dim).to(self.device)
         samples = self.decode(z)
-
-        samples = samples * self.feature_std + self.feature_mean
+        samples_cont = samples[:, :self.hparams.input_dim - 1]
+        samples_cont = samples_cont * self.feature_std + self.feature_mean
+        samples_cat = F.sigmoid(samples[:, self.hparams.input_dim - 1:])
+        samples = torch.cat([samples_cont, samples_cat], dim=1)
         return samples
 
     def configure_optimizers(self):
