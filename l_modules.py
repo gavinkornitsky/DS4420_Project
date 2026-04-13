@@ -16,9 +16,15 @@ class VAEModule(l.LightningModule):
             beta_warmup_epochs = 15,
             beta_anneal_epochs = 60,
             beta_max = 1.0,
+            feature_mean = None,
+            feature_std = None,
     ):
         super().__init__()
-        self.save_hyperparameters()
+        self.save_hyperparameters(ignore=["feature_mean", "feature_std"])
+
+        self.register_buffer("feature_mean", torch.tensor(feature_mean) if feature_mean is not None else torch.zeros(input_dim - 1))
+        self.register_buffer("feature_std", torch.tensor(feature_std) if feature_std is not None else torch.ones(input_dim - 1))
+
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 256),
             nn.ReLU(),
@@ -109,6 +115,14 @@ class VAEModule(l.LightningModule):
         x_recon, mu, logvar = self(x.float())
         loss = self._compute_loss(x, x_recon, mu, logvar, mode='val')
         return loss
+    
+    @torch.no_grad()
+    def generate(self, n_samples=10):
+        z = torch.randn(n_samples, self.hparams.latent_dim).to(self.device)
+        samples = self.decode(z)
+
+        samples = samples * self.feature_std + self.feature_mean
+        return samples
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
