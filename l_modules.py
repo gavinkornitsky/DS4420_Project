@@ -44,7 +44,7 @@ class VAEModule(l.LightningModule):
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
     
-    def vae_tabular_loss(x, x_recon, mu, logvar, ncont=30, beta=0.03):
+    def vae_tabular_loss(self, x, x_recon, mu, logvar, ncont=30, beta=0.03):
         x_cont = x[:, :ncont]
         x_recon_cont = x_recon[:, :ncont]
         recon_loss_cont = F.mse_loss(x_recon_cont, x_cont)
@@ -69,9 +69,18 @@ class VAEModule(l.LightningModule):
     
     def training_step(self, batch):
         x, y = batch
+        y = y.unsqueeze(1)
         x = torch.cat([x, y], dim=1)
         x_recon, mu, logvar = self(x.float())
         loss = self._compute_loss(x, x_recon, mu, logvar, mode='train')
+        return loss
+
+    def validation_step(self, batch):
+        x, y = batch
+        y = y.unsqueeze(1)
+        x = torch.cat([x, y], dim=1)
+        x_recon, mu, logvar = self(x.float())
+        loss = self._compute_loss(x, x_recon, mu, logvar, mode='val')
         return loss
 
     def configure_optimizers(self):
