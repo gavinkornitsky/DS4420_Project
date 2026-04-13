@@ -46,8 +46,9 @@ class WDBCDataModule(l.LightningDataModule):
         self.val_y = torch.tensor(self.y[val_indices])
     
     def train_dataloader(self):
-        class_counts = np.bincount(self.train_y.astype(int), minlength=2)
-        weights = np.where(self.train_y == 0, 1.0 / class_counts[0], 1.0 / class_counts[1])
+        train_y_np = self.train_y.numpy() 
+        class_counts = np.bincount(train_y_np.astype(int), minlength=2)
+        weights = np.where(train_y_np == 0, 1.0 / class_counts[0], 1.0 / class_counts[1])
         sampler = WeightedRandomSampler(weights, num_samples=len(self.train_y), replacement=True)
         return DataLoader(TensorDataset(self.train_X, self.train_y), batch_size=self.batch_size, sampler=sampler)
     
