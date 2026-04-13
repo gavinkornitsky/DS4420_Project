@@ -1,11 +1,24 @@
+import math
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning as l
 
 class VAEModule(l.LightningModule):
-    def __init__(self, input_dim=31, latent_dim=16):
+    def __init__(
+            self, 
+            input_dim=31, 
+            latent_dim=16,
+            lr = 1e-4,
+            weight_decay = 1e-5,
+            label_weight = 10.0,
+            beta_warmup_epochs = 15,
+            beta_anneal_epochs = 60,
+            beta_max = 1.0,
+    ):
         super().__init__()
+        self.save_hyperparameters()
         self.encoder = nn.Sequential(
             nn.Linear(input_dim, 256),
             nn.ReLU(),
@@ -44,7 +57,21 @@ class VAEModule(l.LightningModule):
         z = self.reparameterize(mu, logvar)
         return self.decode(z), mu, logvar
     
-    def vae_tabular_loss(self, x, x_recon, mu, logvar, ncont=30, beta=0.03):
+    def _get_beta(self):
+        epoch = self.current_epoch
+        warmup = self.hparams.beta_warmup_epochs
+        anneal = self.hparams.beta_anneal_epochs
+
+        if epoch < warmup:
+            return 0.0
+        
+        progress = min((epoch - warmup) / max(1, anneal), 1.0)
+
+        return (1 - math.cos(progress * math.pi)) * self.hparams.beta_max * 0.5
+    
+    def vae_tabular_loss(self, x, x_recon, mu, logvar, ncont=30):
+        beta = self._get_beta()
+        self.log("beta", beta, prog_bar=True)
         x_cont = x[:, :ncont]
         x_recon_cont = x_recon[:, :ncont]
         recon_loss_cont = F.mse_loss(x_recon_cont, x_cont)
@@ -84,7 +111,7 @@ class VAEModule(l.LightningModule):
         return loss
 
     def configure_optimizers(self):
-        optimizer = torch.optim.Adam(self.parameters(), lr=1e-4)
+        optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
         return optimizer
 
 if __name__ == "__main__": 
