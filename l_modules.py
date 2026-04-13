@@ -45,13 +45,4 @@ class VAEModule(l.LightningModule):
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
-        # scheduler = torch.optim.lr_scheduler.OneCycleLR(optimizer=optimizer, max_lr=1e-4, total_steps=self.trainer.estimated_stepping_batches)
-
-
-        return {
-            "optimizer": optimizer,
-            # "lr_scheduler": {
-            #     "scheduler": scheduler,
-            #     "interval": "step"
-            # }
-        }
+        return optimizer
