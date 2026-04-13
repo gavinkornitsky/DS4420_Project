@@ -8,40 +8,22 @@ class VAEModule(l.LightningModule):
     def __init__(self, model):
         super().__init__()
         self.model = model
-        self.loss_history = []
-        self.reconstruction_feats_history = []
-        self.reconstruction_labels_history = []
-        self.kl_div_loss_history = []
-        self.lr_history = []
-
-        self.loss_history_epoch = []
-        self.reconstruction_feats_history_epoch = []
-        self.reconstruction_labels_epoch = []
-        self.kl_div_loss_history_epoch = []
         
 
+    def _compute_loss(self, x, x_recon, mu, logvar, mode='train'):
+        loss, recon_cont, recon_cat, kl = vae_tabular_loss(x.float(), x_recon, mu, logvar)
+        self.log(f"{mode}_loss", loss, prog_bar=True)
+        self.log(f"{mode}_recon_cont", recon_cont)
+        self.log(f"{mode}_recon_cat", recon_cat)
+        self.log(f"{mode}_kl_div", kl)
+        return loss
+    
     def training_step(self, batch):
         x, y = batch
         x = torch.cat([x, y], dim=1)
         x_recon, mu, logvar = self.model(x.float())
-        loss, recon_cont, recon_cat, kl = vae_tabular_loss(x.float(), x_recon, mu, logvar)
-        self.loss_history.append(loss.item())
-        self.reconstruction_feats_history.append(recon_cont.item())
-        self.reconstruction_labels_history.append(recon_cat.item())
-        self.kl_div_loss_history.append(kl.item())
+        loss = self._compute_loss(x, x_recon, mu, logvar, mode='train')
         return loss
-
-    def on_train_epoch_end(self):
-        self.loss_history_epoch.append(sum(self.loss_history) / len(self.loss_history))
-        self.reconstruction_feats_history_epoch.append(sum(self.reconstruction_feats_history) / len(self.reconstruction_feats_history))
-        self.reconstruction_labels_epoch.append(sum(self.reconstruction_labels_history) / len(self.reconstruction_labels_history))
-        self.kl_div_loss_history_epoch.append(sum(self.kl_div_loss_history) / len(self.kl_div_loss_history))
-        self.lr_history.append(self.optimizers().param_groups[0]["lr"])
-
-        self.loss_history.clear()
-        self.reconstruction_feats_history.clear()
-        self.reconstruction_labels_history.clear()
-        self.kl_div_loss_history.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.Adam(self.model.parameters(), lr=1e-4)
