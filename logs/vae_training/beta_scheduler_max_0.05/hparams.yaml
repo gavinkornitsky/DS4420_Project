@@ -1,0 +1,8 @@
+beta_anneal_epochs: 60
+beta_max: 0.05
+beta_warmup_epochs: 15
+input_dim: 31
+label_weight: 10.0
+latent_dim: 16
+lr: 0.0001
+weight_decay: 1.0e-05
