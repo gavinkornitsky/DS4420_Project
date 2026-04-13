@@ -10,7 +10,7 @@ class VAEModule(l.LightningModule):
     def __init__(
             self, 
             feature_dim = 30, 
-            label_dim =1,
+            label_dim = 2,
             latent_dim=16,
             hidden_dims=[256, 128, 64],
             dropout = 0.1,
@@ -29,6 +29,9 @@ class VAEModule(l.LightningModule):
         self.register_buffer("feature_mean", torch.tensor(feature_mean) if feature_mean is not None else torch.zeros(feature_dim))
         self.register_buffer("feature_std", torch.tensor(feature_std) if feature_std is not None else torch.ones(feature_dim))
 
+        self.prior_mu = nn.Parameter(torch.randn(label_dim, latent_dim))
+        self.prior_logvar = nn.Parameter(torch.zeros(label_dim, latent_dim))
+
         enc_in = feature_dim + label_dim
         enc_layers = []
         for h in hidden_dims:
@@ -45,9 +48,17 @@ class VAEModule(l.LightningModule):
             dec_in = h
         dec_layers += [nn.Linear(dec_in, feature_dim)]
         self.decoder = nn.Sequential(*dec_layers)
+
+    def _onehot(self, y):
+        return F.one_hot(y.long(), self.hparams.label_dim).float()
+    
+    def get_prior(self, y):
+        idx = y.long().squeeze()
+        return self.prior_mu[idx], self.prior_logvar[idx]
     
     def encode(self, x, y):
-        x = torch.cat([x, y], dim=1)
+        y_onehot = self._onehot(y.squeeze())
+        x = torch.cat([x, y_onehot], dim=1)
         h = self.encoder(x)
         return self.mu_layer(h), self.logvar_layer(h)
 
@@ -57,7 +68,8 @@ class VAEModule(l.LightningModule):
         return mu + eps * std
 
     def decode(self, z, y):
-        z = torch.cat([z, y], dim=1)
+        y_onehot = self._onehot(y.squeeze())
+        z = torch.cat([z, y_onehot], dim=1)
         return self.decoder(z)
 
     def forward(self, x, y):
@@ -77,20 +89,21 @@ class VAEModule(l.LightningModule):
 
         return (1 - math.cos(progress * math.pi)) * self.hparams.beta_max * 0.5
     
-    def vae_tabular_loss(self, x, x_recon, mu, logvar):
+    def vae_conditional_loss(self, x, x_recon, mu, logvar, y):
         beta = self._get_beta()
         self.log("beta", beta, prog_bar=True)
-        x_recon = x_recon
         recon_loss = F.mse_loss(x_recon, x)
 
-        kl = -0.5 * torch.sum(1 + logvar - mu.pow(2) - logvar.exp())
+        prior_mu, prior_logvar = self.get_prior(y)
+
+        kl = 0.5 * torch.sum(prior_logvar - logvar + (logvar.exp() + (mu - prior_mu).pow(2)) / prior_logvar.exp() - 1, dim=-1).mean()
 
         total = recon_loss + beta * kl
         return total, recon_loss, kl
         
 
-    def _compute_loss(self, x, x_recon, mu, logvar, mode='train'):
-        loss, recon_cont, kl = self.vae_tabular_loss(x.float(), x_recon, mu, logvar)
+    def _compute_loss(self, x, x_recon, mu, logvar, y, mode='train'):
+        loss, recon_cont, kl = self.vae_conditional_loss(x.float(), x_recon, mu, logvar, y)
         self.log(f"{mode}_loss", loss, prog_bar=True)
         self.log(f"{mode}_recon_cont", recon_cont)
         self.log(f"{mode}_kl_div", kl)
@@ -100,14 +113,14 @@ class VAEModule(l.LightningModule):
         x, y = batch
         y = y.unsqueeze(1)
         x_recon, mu, logvar = self(x.float(), y)
-        loss = self._compute_loss(x, x_recon, mu, logvar, mode='train')
+        loss = self._compute_loss(x, x_recon, mu, logvar, y, mode='train')
         return loss
 
     def validation_step(self, batch):
         x, y = batch
         y = y.unsqueeze(1)
         x_recon, mu, logvar = self(x.float(), y)
-        loss = self._compute_loss(x, x_recon, mu, logvar, mode='val')
+        loss = self._compute_loss(x, x_recon, mu, logvar, y, mode='val')
         return loss
     
     @torch.no_grad()
