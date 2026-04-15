@@ -1,6 +1,6 @@
 ---
-title: "logisticregression_model"
-author: "Gavin Kornitsky and Tomohiro Oga"
+title: "Real Data only Model"
+author: "gavinkornitsky"
 date: "2026-04-10"
 output: html_document
 ---
@@ -28,7 +28,6 @@ test_features  <- as.data.frame(test_features)
 test_targets   <- as.data.frame(test_targets)
 
 target_name <- names(train_targets)[1]
-
 
 train_df <- cbind(train_features, train_targets)
 test_df  <- cbind(test_features, test_targets)
@@ -213,11 +212,10 @@ posterior_summary <- data.frame(
 posterior_summary
 ```
 
-
 ### classify test observations
-so, compute predicted prob under each posteiror draw, then avg over all posterior samples
+so, compute predicted prob under each posterior draw, then avg over all posterior samples
 ```{r}
-predict_posterior_probs <- function(X_new, samples_matrix) {
+predict_posterior_prob_matrix <- function(X_new, samples_matrix) {
   n_obs <- nrow(X_new)
   n_draws <- nrow(samples_matrix)
 
@@ -228,13 +226,47 @@ predict_posterior_probs <- function(X_new, samples_matrix) {
     prob_matrix[, s] <- sigmoid(X_new %*% beta_s)
   }
 
+  prob_matrix
+}
+
+predict_posterior_probs <- function(X_new, samples_matrix) {
+  prob_matrix <- predict_posterior_prob_matrix(X_new, samples_matrix)
   rowMeans(prob_matrix)
 }
 
-test_probs <- predict_posterior_probs(X_test, fit$samples)
+test_prob_matrix <- predict_posterior_prob_matrix(X_test, fit$samples)
+test_probs <- rowMeans(test_prob_matrix)
 test_preds <- ifelse(test_probs >= 0.5, 1, 0)
 ```
 
+### posterior prediction summary
+measure how certain the model is for each test point
+```{r}
+posterior_prediction_summary <- data.frame(
+  row_id = seq_along(y_test),
+  y_true = y_test,
+  mean_prob = apply(test_prob_matrix, 1, mean),
+  sd_prob = apply(test_prob_matrix, 1, sd),
+  lower_95 = apply(test_prob_matrix, 1, quantile, probs = 0.025),
+  upper_95 = apply(test_prob_matrix, 1, quantile, probs = 0.975)
+)
+
+posterior_prediction_summary$pred_class <- ifelse(
+  posterior_prediction_summary$mean_prob >= 0.5, 1, 0
+)
+
+posterior_prediction_summary$interval_width <-
+  posterior_prediction_summary$upper_95 - posterior_prediction_summary$lower_95
+
+posterior_prediction_summary$entropy <- -(
+  posterior_prediction_summary$mean_prob *
+    log(pmax(posterior_prediction_summary$mean_prob, 1e-10)) +
+  (1 - posterior_prediction_summary$mean_prob) *
+    log(pmax(1 - posterior_prediction_summary$mean_prob, 1e-10))
+)
+
+posterior_prediction_summary
+```
 
 ### accuracy, precision, recall, f1
 ```{r}
@@ -282,15 +314,98 @@ compute_auc <- function(y_true, scores) {
 auroc <- compute_auc(y_test, test_probs)
 ```
 
+## Create ROC Curve Points
+
+```{r}
+compute_roc_points <- function(y_true, scores) {
+  ord <- order(scores, decreasing = TRUE)
+  y_true <- y_true[ord]
+
+  pos <- sum(y_true == 1)
+  neg <- sum(y_true == 0)
+
+  if (pos == 0 || neg == 0) {
+    stop("both positive and negative classes are required")
+  }
+
+  tpr <- cumsum(y_true == 1) / pos
+  fpr <- cumsum(y_true == 0) / neg
+
+  data.frame(
+    fpr = c(0, fpr, 1),
+    tpr = c(0, tpr, 1)
+  )
+}
+
+roc_points <- compute_roc_points(y_test, test_probs)
+
+plot(
+  roc_points$fpr,
+  roc_points$tpr,
+  type = "l",
+  lwd = 2,
+  xlab = "False Positive Rate",
+  ylab = "True Positive Rate",
+  main = "ROC Curve for Bayesian Logistic Regression",
+  xlim = c(0, 1),
+  ylim = c(0, 1)
+)
+
+abline(a = 0, b = 1, lty = 2)
+
+text(
+  x = 0.65,
+  y = 0.2,
+  labels = paste("AUROC =", round(auroc, 4))
+)
+```
+
 ### performance results
 ```{r}
 cat("Performance\n")
 cat("------------------\n")
-cat("accuracy :", round(accuracy, 4), "\n")
+cat("accuracy:", round(accuracy, 4), "\n")
 cat("precision:", round(precision, 4), "\n")
-cat("recall   :", round(recall, 4), "\n")
-cat("f1 score :", round(f1_score, 4), "\n")
-cat("auroc    :", round(auroc, 4), "\n")
+cat("recall:", round(recall, 4), "\n")
+cat("f1 score:", round(f1_score, 4), "\n")
+cat("auroc:", round(auroc, 4), "\n")
+```
+
+### save results for python
+```{r}
+metrics_table <- data.frame(
+  model = "real_only",
+  accuracy = accuracy,
+  precision = precision,
+  recall = recall,
+  f1_score = f1_score,
+  auroc = auroc
+)
+
+predictions_table <- data.frame(
+  model = "real_only",
+  row_id = seq_along(y_test),
+  y_true = y_test,
+  y_prob = as.numeric(test_probs),
+  y_pred = as.numeric(test_preds)
+)
+
+roc_points$model <- "real_only"
+posterior_summary$model <- "real_only"
+posterior_prediction_summary$model <- "real_only"
+
+dir.create("results/real", showWarnings = FALSE, recursive = TRUE)
+
+write_parquet(metrics_table, "results/real/metrics.parquet")
+write_parquet(predictions_table, "results/real/predictions.parquet")
+write_parquet(roc_points, "results/real/roc_points.parquet")
+write_parquet(posterior_summary, "results/real/posterior_summary.parquet")
+write_parquet(
+  posterior_prediction_summary,
+  "results/real/posterior_prediction_summary.parquet"
+)
+
+metrics_table
 ```
 
 ### mcmc diagnostic
