@@ -4,24 +4,23 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import lightning as l
-import numpy as np
 
 class VAEModule(l.LightningModule):
     def __init__(
-            self, 
-            feature_dim = 30, 
-            label_dim = 2,
-            latent_dim=16,
-            hidden_dims=[256, 128, 64],
-            dropout = 0.1,
-            lr = 1e-4,
-            weight_decay = 1e-5,
-            label_weight = 10.0,
-            beta_warmup_epochs = 15,
-            beta_anneal_epochs = 60,
-            beta_max = 1.0,
-            feature_mean = None,
-            feature_std = None,
+        self,
+        feature_dim = 30,
+        label_dim = 2,
+        latent_dim = 16,
+        hidden_dims = [256, 128, 64],
+        dropout = 0.1,
+        lr = 1e-4,
+        weight_decay = 1e-5,
+        label_weight = 1.0,
+        beta_warmup_epochs = 15,
+        beta_anneal_epochs = 60,
+        beta_max = 1.0,
+        feature_mean = None,
+        feature_std = None,
     ):
         super().__init__()
         self.save_hyperparameters(ignore=["feature_mean", "feature_std"])
@@ -32,7 +31,7 @@ class VAEModule(l.LightningModule):
         self.prior_mu = nn.Parameter(torch.randn(label_dim, latent_dim))
         self.prior_logvar = nn.Parameter(torch.zeros(label_dim, latent_dim))
 
-        enc_in = feature_dim + label_dim
+        enc_in = feature_dim
         enc_layers = []
         for h in hidden_dims:
             enc_layers += [nn.Linear(enc_in, h), nn.ReLU(), nn.Dropout(dropout)]
@@ -41,24 +40,26 @@ class VAEModule(l.LightningModule):
         self.mu_layer = nn.Linear(hidden_dims[-1], latent_dim)
         self.logvar_layer = nn.Linear(hidden_dims[-1], latent_dim)
 
-        dec_in = latent_dim + label_dim
+        dec_in = latent_dim
         dec_layers = []
         for h in reversed(hidden_dims):
             dec_layers += [nn.Linear(dec_in, h), nn.ReLU(), nn.Dropout(dropout)]
             dec_in = h
-        dec_layers += [nn.Linear(dec_in, feature_dim)]
         self.decoder = nn.Sequential(*dec_layers)
+        self.fc_features = nn.Linear(dec_in, feature_dim)
 
-    def _onehot(self, y):
-        return F.one_hot(y.long(), self.hparams.label_dim).float()
-    
+        self.classifier = nn.Sequential(
+            nn.Linear(latent_dim, hidden_dims[-1]),
+            nn.ReLU(),
+            nn.Dropout(dropout),
+            nn.Linear(hidden_dims[-1], 1),
+        )
+
     def get_prior(self, y):
-        idx = y.long().squeeze()
+        idx = y.long().view(-1)
         return self.prior_mu[idx], self.prior_logvar[idx]
-    
-    def encode(self, x, y):
-        y_onehot = self._onehot(y.squeeze())
-        x = torch.cat([x, y_onehot], dim=1)
+
+    def encode(self, x):
         h = self.encoder(x)
         return self.mu_layer(h), self.logvar_layer(h)
 
@@ -67,16 +68,20 @@ class VAEModule(l.LightningModule):
         eps = torch.randn_like(std)
         return mu + eps * std
 
-    def decode(self, z, y):
-        y_onehot = self._onehot(y.squeeze())
-        z = torch.cat([z, y_onehot], dim=1)
-        return self.decoder(z)
+    def decode(self, z):
+        h = self.decoder(z)
+        return self.fc_features(h)
 
-    def forward(self, x, y):
-        mu, logvar = self.encode(x, y)
+    def classify(self, z):
+        return self.classifier(z)
+
+    def forward(self, x):
+        mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
-        return self.decode(z, y), mu, logvar
-    
+        x_hat = self.decode(z)
+        y_logit = self.classify(z)
+        return x_hat, y_logit, mu, logvar
+
     def _get_beta(self):
         epoch = self.current_epoch
         warmup = self.hparams.beta_warmup_epochs
@@ -84,67 +89,89 @@ class VAEModule(l.LightningModule):
 
         if epoch < warmup:
             return 0.0
-        
         progress = min((epoch - warmup) / max(1, anneal), 1.0)
 
         return (1 - math.cos(progress * math.pi)) * self.hparams.beta_max * 0.5
-    
-    def vae_conditional_loss(self, x, x_recon, mu, logvar, y):
+
+    def vae_conditional_loss(self, x, x_recon, mu, logvar, y, y_hat):
         beta = self._get_beta()
         self.log("beta", beta, prog_bar=True)
-        recon_loss = F.mse_loss(x_recon, x)
+        recon_feat_loss = F.mse_loss(x_recon, x)
+        recon_label_loss = F.binary_cross_entropy_with_logits(y_hat, y, reduction='mean')
 
         prior_mu, prior_logvar = self.get_prior(y)
 
         kl = 0.5 * torch.sum(prior_logvar - logvar + (logvar.exp() + (mu - prior_mu).pow(2)) / prior_logvar.exp() - 1, dim=-1).mean()
 
-        total = recon_loss + beta * kl
-        return total, recon_loss, kl
-        
+        total = recon_feat_loss + self.hparams.label_weight * recon_label_loss + beta * kl
+        return total, recon_feat_loss, recon_label_loss, kl
 
-    def _compute_loss(self, x, x_recon, mu, logvar, y, mode='train'):
-        loss, recon_cont, kl = self.vae_conditional_loss(x.float(), x_recon, mu, logvar, y)
+    def _compute_loss(self, x, x_recon, mu, logvar, y, y_hat, mode='train'):
+        loss, recon_cont, recon_label, kl = self.vae_conditional_loss(x.float(), x_recon, mu, logvar, y, y_hat)
         self.log(f"{mode}_loss", loss, prog_bar=True)
         self.log(f"{mode}_recon_cont", recon_cont)
+        self.log(f"{mode}_recon_label", recon_label)
         self.log(f"{mode}_kl_div", kl)
         return loss
-    
+
     def training_step(self, batch):
         x, y = batch
         y = y.unsqueeze(1)
-        x_recon, mu, logvar = self(x.float(), y)
-        loss = self._compute_loss(x, x_recon, mu, logvar, y, mode='train')
+        x_recon, y_hat, mu, logvar = self(x.float())
+        loss = self._compute_loss(x, x_recon, mu, logvar, y, y_hat, mode='train')
         return loss
 
     def validation_step(self, batch):
         x, y = batch
         y = y.unsqueeze(1)
-        x_recon, mu, logvar = self(x.float(), y)
-        loss = self._compute_loss(x, x_recon, mu, logvar, y, mode='val')
+        x_recon, y_hat, mu, logvar = self(x.float())
+        loss = self._compute_loss(x, x_recon, mu, logvar, y, y_hat, mode='val')
         return loss
-    
+
     @torch.no_grad()
-    def generate(self, n_samples=10, y=None):
-        z = torch.randn(n_samples, self.hparams.latent_dim).to(self.device)
-        if y is None:
-            y = torch.randint(0, 2, (n_samples, self.hparams.label_dim), dtype=torch.float32, device=self.device)
-        else:
-            y = torch.as_tensor(y, dtype=torch.float32, device=self.device)
-            if y.dim() == 1:
-                y = y.unsqueeze(1)
-        samples = self.decode(z, y)
-        samples = samples * self.feature_std + self.feature_mean
+    def generate(self, n_samples=1000, class_ratio=0.5, temperature=1.0, seed=None):
+        self.eval()
+        device = self.device
+
+        if seed is not None:
+            torch.manual_seed(seed)
+
+        n_pos = int(n_samples * class_ratio)
+        n_neg = n_samples - n_pos
+        y = torch.cat([torch.zeros(n_neg), torch.ones(n_pos)]).to(device)
+        prior_mu, prior_logvar = self.get_prior(y)
+        prior_std = (0.5 * prior_logvar).exp() * temperature
+        z = prior_mu + torch.randn_like(prior_std) * prior_std
+
+        x_hat = self.decode(z)
+        samples = x_hat * self.feature_std + self.feature_mean
         return samples, y
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.hparams.lr, weight_decay=self.hparams.weight_decay)
-        return optimizer
+        scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=self.hparams.lr,
+            total_steps=self.trainer.estimated_stepping_batches,
+            pct_start=0.3,
+            anneal_strategy="cos",
+            div_factor=25.0,
+            final_div_factor=1e4,
+        )
+        return {
+            "optimizer": optimizer,
+            "lr_scheduler": {
+                "scheduler": scheduler,
+                "interval": "step",
+            },
+        }
 
-if __name__ == "__main__": 
+
+if __name__ == "__main__":
     dummy_x = torch.randn(4, 30)
-    dummy_y = torch.tensor([[0], [1], [0], [1]], dtype=torch.float32)
-    model = VAEModule(feature_dim=30, label_dim=1, latent_dim=16)
-    x_recon, mu, logvar = model(dummy_x, dummy_y)
-    print("Output shape:", x_recon.shape)
-    print("Mu shape:", mu.shape)
-    print("Logvar shape:", logvar.shape)    
+    model = VAEModule(feature_dim=30, label_dim=2, latent_dim=16)
+    x_recon, y_hat, mu, logvar = model(dummy_x)
+    print("x_recon shape:", x_recon.shape)
+    print("y_hat shape:", y_hat.shape)
+    print("mu shape:", mu.shape)
+    print("logvar shape:", logvar.shape)
