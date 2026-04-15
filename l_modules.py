@@ -46,7 +46,8 @@ class VAEModule(l.LightningModule):
             dec_layers += [nn.Linear(dec_in, h), nn.ReLU(), nn.Dropout(dropout)]
             dec_in = h
         self.decoder = nn.Sequential(*dec_layers)
-        self.fc_features = nn.Linear(dec_in, feature_dim)
+        # outputs per-feature (mu, logvar) -> 2 * feature_dim
+        self.fc_features = nn.Linear(dec_in, 2 * feature_dim)
 
         self.classifier = nn.Sequential(
             nn.Linear(latent_dim, hidden_dims[-1]),
@@ -70,7 +71,9 @@ class VAEModule(l.LightningModule):
 
     def decode(self, z):
         h = self.decoder(z)
-        return self.fc_features(h)
+        out = self.fc_features(h)
+        mu_x, logvar_x = out.chunk(2, dim=-1)
+        return mu_x, logvar_x
 
     def classify(self, z):
         return self.classifier(z)
@@ -78,9 +81,9 @@ class VAEModule(l.LightningModule):
     def forward(self, x):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar)
-        x_hat = self.decode(z)
+        mu_x, logvar_x = self.decode(z)
         y_logit = self.classify(z)
-        return x_hat, y_logit, mu, logvar
+        return mu_x, logvar_x, y_logit, mu, logvar
 
     def _get_beta(self):
         epoch = self.current_epoch
@@ -93,10 +96,17 @@ class VAEModule(l.LightningModule):
 
         return (1 - math.cos(progress * math.pi)) * self.hparams.beta_max * 0.5
 
-    def vae_conditional_loss(self, x, x_recon, mu, logvar, y, y_hat):
+    def vae_conditional_loss(self, x, mu_x, logvar_x, mu, logvar, y, y_hat):
         beta = self._get_beta()
         self.log("beta", beta, prog_bar=True)
-        recon_feat_loss = F.mse_loss(x_recon, x)
+
+        nll_elem = 0.5 * (
+            logvar_x
+            + (x - mu_x).pow(2) / logvar_x.exp()
+            + math.log(2 * math.pi)
+        )
+        recon_feat_loss = nll_elem.mean()
+
         recon_label_loss = F.binary_cross_entropy_with_logits(y_hat, y, reduction='mean')
 
         prior_mu, prior_logvar = self.get_prior(y)
@@ -106,30 +116,31 @@ class VAEModule(l.LightningModule):
         total = recon_feat_loss + self.hparams.label_weight * recon_label_loss + beta * kl
         return total, recon_feat_loss, recon_label_loss, kl
 
-    def _compute_loss(self, x, x_recon, mu, logvar, y, y_hat, mode='train'):
-        loss, recon_cont, recon_label, kl = self.vae_conditional_loss(x.float(), x_recon, mu, logvar, y, y_hat)
+    def _compute_loss(self, x, mu_x, logvar_x, mu, logvar, y, y_hat, mode='train'):
+        loss, recon_cont, recon_label, kl = self.vae_conditional_loss(x.float(), mu_x, logvar_x, mu, logvar, y, y_hat)
         self.log(f"{mode}_loss", loss, prog_bar=True)
         self.log(f"{mode}_recon_cont", recon_cont)
         self.log(f"{mode}_recon_label", recon_label)
         self.log(f"{mode}_kl_div", kl)
+        self.log(f"{mode}_decoder_sigma", (0.5 * logvar_x).exp().mean())
         return loss
 
     def training_step(self, batch):
         x, y = batch
         y = y.unsqueeze(1)
-        x_recon, y_hat, mu, logvar = self(x.float())
-        loss = self._compute_loss(x, x_recon, mu, logvar, y, y_hat, mode='train')
+        mu_x, logvar_x, y_hat, mu, logvar = self(x.float())
+        loss = self._compute_loss(x, mu_x, logvar_x, mu, logvar, y, y_hat, mode='train')
         return loss
 
     def validation_step(self, batch):
         x, y = batch
         y = y.unsqueeze(1)
-        x_recon, y_hat, mu, logvar = self(x.float())
-        loss = self._compute_loss(x, x_recon, mu, logvar, y, y_hat, mode='val')
+        mu_x, logvar_x, y_hat, mu, logvar = self(x.float())
+        loss = self._compute_loss(x, mu_x, logvar_x, mu, logvar, y, y_hat, mode='val')
         return loss
 
     @torch.no_grad()
-    def generate(self, n_samples=1000, class_ratio=0.5, temperature=1.0, seed=None):
+    def generate(self, n_samples=1000, class_ratio=0.5, temperature=1.0, sample_decoder=True, seed=None):
         self.eval()
         device = self.device
 
@@ -143,7 +154,12 @@ class VAEModule(l.LightningModule):
         prior_std = (0.5 * prior_logvar).exp() * temperature
         z = prior_mu + torch.randn_like(prior_std) * prior_std
 
-        x_hat = self.decode(z)
+        mu_x, logvar_x = self.decode(z)
+        if sample_decoder:
+            std_x = (0.5 * logvar_x).exp()
+            x_hat = mu_x + torch.randn_like(mu_x) * std_x
+        else:
+            x_hat = mu_x
         samples = x_hat * self.feature_std + self.feature_mean
         return samples, y
 
@@ -170,8 +186,11 @@ class VAEModule(l.LightningModule):
 if __name__ == "__main__":
     dummy_x = torch.randn(4, 30)
     model = VAEModule(feature_dim=30, label_dim=2, latent_dim=16)
-    x_recon, y_hat, mu, logvar = model(dummy_x)
-    print("x_recon shape:", x_recon.shape)
+    mu_x, logvar_x, y_hat, mu, logvar = model(dummy_x)
+    print("mu_x shape:", mu_x.shape)
+    print("logvar_x shape:", logvar_x.shape)
     print("y_hat shape:", y_hat.shape)
     print("mu shape:", mu.shape)
     print("logvar shape:", logvar.shape)
+    samples, ys = model.generate(n_samples=8, class_ratio=0.5, seed=0)
+    print("samples shape:", samples.shape, "| labels:", ys.tolist())

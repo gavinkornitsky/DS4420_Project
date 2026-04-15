@@ -1,0 +1,14 @@
+beta_anneal_epochs: 100
+beta_max: 0.05
+beta_warmup_epochs: 10
+dropout: 0.1
+feature_dim: 30
+hidden_dims:
+- 256
+- 128
+- 64
+label_dim: 2
+label_weight: 0.5
+latent_dim: 12
+lr: 0.001
+weight_decay: 1.0e-05
