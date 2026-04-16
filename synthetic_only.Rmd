@@ -34,6 +34,7 @@ target_name <- names(synthetic_targets)[1]
 
 synthetic_df <- cbind(synthetic_features, synthetic_targets)
 test_df      <- cbind(test_features, test_targets)
+synthetic_df
 ```
 
 ### clean target variable 

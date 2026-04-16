@@ -2,7 +2,9 @@
 title: "Real Data only Model"
 author: "gavinkornitsky"
 date: "2026-04-10"
-output: html_document
+output:
+  pdf_document: default
+  html_document: default
 ---
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE)
@@ -102,30 +104,25 @@ X_train <- cbind(Intercept = 1, X_train)
 X_test  <- cbind(Intercept = 1, X_test)
 ```
 
-### model function definitions 
-```{r}
-# computes predicted probabilities
-sigmoid <- function(z) {
-  1 / (1 + exp(-z))
-}
 
-# computes bernoilli log likelihood
+### model function definitions 
+
+```{r}
+sigmoid <- function(z) {
+  1 / (1 + exp(-z))}
+
 log_likelihood <- function(beta, X, y) {
   eta <- X %*% beta
   p <- sigmoid(eta)
-
   eps <- 1e-10
   p <- pmin(pmax(p, eps), 1 - eps)
 
-  sum(y * log(p) + (1 - y) * log(1 - p))
-}
+  sum(y * log(p) + (1 - y) * log(1 - p))}
 
-# defines a normal prior on the coefficients 
 log_prior <- function(beta, prior_sd = 2.5) {
   sum(dnorm(beta, mean = 0, sd = prior_sd, log = TRUE))
 }
 
-# posterior  
 log_posterior <- function(beta, X, y, prior_sd = 2.5) {
   log_likelihood(beta, X, y) + log_prior(beta, prior_sd)
 }
@@ -210,7 +207,50 @@ posterior_summary <- data.frame(
 )
 
 posterior_summary
+
 ```
+
+```{r}
+### posterior coefficient variation
+# cv_signed = sd / mean
+# cv_abs = sd / abs(mean) is usually easier to interpret
+
+posterior_summary$lower_95 <- apply(
+  fit$samples,
+  2,
+  quantile,
+  probs = 0.025
+)
+
+posterior_summary$upper_95 <- apply(
+  fit$samples,
+  2,
+  quantile,
+  probs = 0.975
+)
+
+posterior_summary$cv_signed <- with(
+  posterior_summary,
+  ifelse(posterior_mean == 0, NA, posterior_sd / posterior_mean)
+)
+
+posterior_summary$cv_abs <- with(
+  posterior_summary,
+  posterior_sd / pmax(abs(posterior_mean), 1e-8)
+)
+
+posterior_summary$significant_95 <- with(
+  posterior_summary,
+  (lower_95 > 0) | (upper_95 < 0)
+)
+
+posterior_summary <- posterior_summary[
+  order(posterior_summary$cv_abs),
+]
+
+posterior_summary
+```
+
 
 ### classify test observations
 so, compute predicted prob under each posterior draw, then avg over all posterior samples
@@ -371,6 +411,58 @@ cat("f1 score:", round(f1_score, 4), "\n")
 cat("auroc:", round(auroc, 4), "\n")
 ```
 
+### permutation importance
+# shuffle one feature at a time in the test set
+# larger AUROC drop = more important feature
+```{r}
+baseline_probs <- predict_posterior_probs(X_test, fit$samples)
+baseline_auroc <- compute_auc(y_test, baseline_probs)
+
+n_repeats <- 30
+
+perm_results <- data.frame()
+
+set.seed(4420)
+
+for (j in seq_along(x_cols)) {
+  for (r in 1:n_repeats) {
+    X_test_perm <- X_test
+    
+    # +1 because column 1 is the intercept
+    X_test_perm[, j + 1] <- sample(X_test_perm[, j + 1])
+    
+    perm_probs <- predict_posterior_probs(X_test_perm, fit$samples)
+    perm_auroc <- compute_auc(y_test, perm_probs)
+    
+    perm_results <- rbind(
+      perm_results,
+      data.frame(
+        feature = x_cols[j],
+        repeat_id = r,
+        permuted_auroc = perm_auroc,
+        auroc_drop = baseline_auroc - perm_auroc
+      )
+    )
+  }
+}
+
+perm_summary <- aggregate(
+  auroc_drop ~ feature,
+  data = perm_results,
+  FUN = function(x) c(mean = mean(x), sd = sd(x))
+)
+
+perm_summary <- data.frame(
+  feature = perm_summary$feature,
+  mean_auroc_drop = perm_summary$auroc_drop[, "mean"],
+  sd_auroc_drop = perm_summary$auroc_drop[, "sd"]
+)
+
+perm_summary <- perm_summary[order(-perm_summary$mean_auroc_drop), ]
+
+perm_summary
+```
+
 ### save results for python
 ```{r}
 metrics_table <- data.frame(
@@ -390,38 +482,38 @@ predictions_table <- data.frame(
   y_pred = as.numeric(test_preds)
 )
 
+posterior_draws_real <- as.data.frame(fit$samples)
+posterior_draws_real$draw_id <- seq_len(nrow(posterior_draws_real))
+posterior_draws_real_long <- reshape(
+  posterior_draws_real,
+  direction = "long",
+  varying = colnames(fit$samples),
+  v.names = "beta",
+  timevar = "term",
+  times = colnames(fit$samples)
+)
+
+posterior_draws_real_long <- posterior_draws_real_long[
+  posterior_draws_real_long$term != "Intercept",
+]
+
+posterior_draws_real_long$model <- "real_only"
+
+
+
 roc_points$model <- "real_only"
 posterior_summary$model <- "real_only"
 posterior_prediction_summary$model <- "real_only"
-
+perm_summary$model <- "real_only"
 dir.create("results/real", showWarnings = FALSE, recursive = TRUE)
 
+write_parquet(posterior_draws_real_long,"results/real/posterior_draws_long.parquet")
 write_parquet(metrics_table, "results/real/metrics.parquet")
 write_parquet(predictions_table, "results/real/predictions.parquet")
 write_parquet(roc_points, "results/real/roc_points.parquet")
 write_parquet(posterior_summary, "results/real/posterior_summary.parquet")
-write_parquet(
-  posterior_prediction_summary,
-  "results/real/posterior_prediction_summary.parquet"
-)
+write_parquet(posterior_prediction_summary,"results/real/posterior_prediction_summary.parquet")
+write_parquet(perm_summary,"results/real/permutation_importance.parquet")
 
 metrics_table
-```
-
-### mcmc diagnostic
-```{r}
-plot(
-  fit$raw_samples[, 1],
-  type = "l",
-  xlab = "iteration",
-  ylab = "intercept",
-  main = "trace plot: intercept"
-)
-
-hist(
-  fit$samples[, 1],
-  breaks = 30,
-  main = "posterior of intercept",
-  xlab = "intercept"
-)
 ```
